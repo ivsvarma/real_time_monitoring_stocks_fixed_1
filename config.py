@@ -5,6 +5,7 @@
 
 import os
 import pandas as pd
+from datetime import datetime
 
 # ------------------------------------------------------------
 # PROJECT ROOT
@@ -13,22 +14,17 @@ import pandas as pd
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # ------------------------------------------------------------
-# DATE CONFIG (UPDATED DAILY)
+# UI DEFAULTS (Placeholders Only)
+# ------------------------------------------------------------
+# These are ONLY used to set the default value of the Date Picker in the UI.
+# The actual logic will use whatever the user selects in the App.
+DEFAULT_DECISION_DATE = pd.Timestamp(datetime.now().date())
+
+# ------------------------------------------------------------
+# STRATEGY CONSTANTS
 # ------------------------------------------------------------
 
-# Friday after market close
-DECISION_DATE = pd.Timestamp("2025-12-05")
-
-# Next trading day (Monday)
-ENTRY_DATE = pd.Timestamp("2025-12-08")
-
-# Holding period (TRADING DAYS)
 HOLDING_DAYS = 5
-
-# ------------------------------------------------------------
-# STRATEGY CONFIG
-# ------------------------------------------------------------
-
 TOP_K = 5
 MIN_TRAIN_ROWS = 3000
 INITIAL_CAPITAL = 100_000
@@ -55,6 +51,11 @@ CONSOLIDATED_BHAVCOPY = os.path.join(
 
 LIVE_BHAVCOPY_DIR = os.path.join(
     DATA_DIR, "live_bhavcopy"
+)
+
+# Temp folder specifically for the Realtime Monitoring Tab
+MONITOR_DIR = os.path.join(
+    DATA_DIR, "monitor_temp"
 )
 
 # ------------------------------------------------------------

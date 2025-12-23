@@ -7,7 +7,6 @@ import pandas as pd
 import numpy as np
 
 from config import (
-    DECISION_DATE,
     HOLDING_DAYS,
     MASTER_CSV,
     LIVE_TRADES_FILE,
@@ -20,46 +19,63 @@ from config import (
 # ============================================================
 
 def extract_base_symbol(sym: str) -> str:
-    if sym.endswith("_POST"):
-        return sym.replace("_POST", "")
-    if sym.endswith("_PRE"):
-        return sym.replace("_PRE", "")
+    if isinstance(sym, str):
+        if sym.endswith("_POST"):
+            return sym.replace("_POST", "")
+        if sym.endswith("_PRE"):
+            return sym.replace("_PRE", "")
     return sym
 
 # ============================================================
 # RUN PERFORMANCE CHECK
 # ============================================================
 
-def run_weekly_performance_check(exit_date):
+def run_weekly_performance_check(decision_date):
+    """
+    Calculates performance relative to a specific Decision Date.
+    It automatically finds the entry (T+1) and exit (T+5) from the data.
+    """
+    
+    decision_date = pd.to_datetime(decision_date)
 
     # --------------------------------------------------------
     # Load data
     # --------------------------------------------------------
 
     df = pd.read_csv(MASTER_CSV, low_memory=False)
-    df["DATE1"] = pd.to_datetime(df["DATE1"])
+    if "DATE1" in df.columns:
+        df["DATE1"] = pd.to_datetime(df["DATE1"])
+    else:
+        df["DATE1"] = pd.to_datetime(df["DATE"])
 
-    trades = pd.read_csv(
-        LIVE_TRADES_FILE(exit_date - pd.Timedelta(days=HOLDING_DAYS))
-    )
-
-    symbols_model = trades["SYMBOL"].unique()
-
-    # --------------------------------------------------------
-    # Trading calendar
-    # --------------------------------------------------------
-
+    # Load trades generated for this specific Entry Date
+    # Note: Trade file naming convention usually uses Entry Date
+    # We need to calculate Entry Date first to find the file
+    
     dates = np.sort(df["DATE1"].unique())
-
-    decision_idx = np.where(
-        dates == np.datetime64(DECISION_DATE)
-    )[0]
+    decision_idx = np.where(dates == np.datetime64(decision_date))[0]
 
     if len(decision_idx) == 0:
-        raise RuntimeError("Decision date not found")
+        raise RuntimeError(f"Decision date {decision_date.date()} not found in Master Data")
 
-    entry_date = pd.Timestamp(dates[decision_idx[0] + 1])
-    exit_date = pd.Timestamp(dates[decision_idx[0] + HOLDING_DAYS])
+    # Calculate Entry and Exit based on Trading Calendar
+    try:
+        entry_ts = dates[decision_idx[0] + 1]
+        exit_ts = dates[decision_idx[0] + HOLDING_DAYS]
+    except IndexError:
+        raise RuntimeError("Not enough future data points for Entry/Exit calculation")
+
+    entry_date = pd.Timestamp(entry_ts)
+    exit_date = pd.Timestamp(exit_ts)
+
+    # Load Trades
+    trade_file = LIVE_TRADES_FILE(entry_date.date())
+    try:
+        trades = pd.read_csv(trade_file)
+    except FileNotFoundError:
+        raise RuntimeError(f"Trade file not found: {trade_file}")
+
+    symbols_model = trades["SYMBOL"].unique()
 
     # --------------------------------------------------------
     # Entry prices (AVG_PRICE)
@@ -134,6 +150,8 @@ def run_weekly_performance_check(exit_date):
 
     summary = pd.DataFrame({
         "Metric": [
+            "Entry Date",
+            "Exit Date",
             "Universe Mean Return",
             "Universe Median Return",
             "Model Mean Return",
@@ -141,10 +159,11 @@ def run_weekly_performance_check(exit_date):
             "Alpha (Mean)",
             "Alpha (Median)",
             "Universe Win Rate",
-            "Model Win Rate",
-            "Model Rank Percentile"
+            "Model Win Rate"
         ],
         "Value": [
+            str(entry_date.date()),
+            str(exit_date.date()),
             universe_returns["return_5d"].mean(),
             universe_returns["return_5d"].median(),
             model_returns["return_5d"].mean(),
@@ -154,13 +173,9 @@ def run_weekly_performance_check(exit_date):
             model_returns["return_5d"].median()
             - universe_returns["return_5d"].median(),
             (universe_returns["return_5d"] > 0).mean(),
-            (model_returns["return_5d"] > 0).mean(),
-            (universe_returns["return_5d"]
-             < model_returns["return_5d"].mean()).mean()
+            (model_returns["return_5d"] > 0).mean()
         ]
     })
-
-    summary["Value"] = summary["Value"].round(4)
 
     # --------------------------------------------------------
     # Save outputs

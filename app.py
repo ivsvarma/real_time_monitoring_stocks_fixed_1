@@ -5,17 +5,21 @@
 
 import streamlit as st
 import pandas as pd
+from datetime import datetime, timedelta
 
 from config import (
-    DECISION_DATE,
-    ENTRY_DATE,
+    DEFAULT_DECISION_DATE, # Only used as a default UI value
     MASTER_CSV,
     REGIME_TABLE,
     MACRO_MAP,
     RESULTS_DIR
 )
 
-from data_pipeline import run_daily_data_pipeline, get_master_date_range
+from data_pipeline import (
+    run_daily_data_pipeline, 
+    get_master_date_range, 
+    fetch_monitoring_data
+)
 from corporate_cleaner import clean_corporate_events
 from regime_engine import integrate_regimes
 from feature_engineer import add_features
@@ -35,241 +39,232 @@ st.set_page_config(
 st.title("📈 Quant Trading – Real-Time Monitoring")
 
 # ============================================================
-# SIDEBAR
-# ============================================================
-st.sidebar.header("📅 Data Controls")
-
-# -------------------------------
-# 1. Show Current Master Range
-# -------------------------------
-current_start, current_end = get_master_date_range()
-
-st.sidebar.markdown(f"""
-**Current Master Data Range:**
-*   Start: `{current_start}`
-*   End:   `{current_end}`
-""")
-
-st.sidebar.divider()
-
-# -------------------------------
-# 2. Data Update Mode (Toggle)
-# -------------------------------
-st.sidebar.subheader("📥 Data Operations")
-
-# User decides if they want to download new data
-update_data_mode = st.sidebar.checkbox("Download & Append New Data?", value=True)
-
-if update_data_mode:
-    st.sidebar.success("Mode: Fetching new Bhavcopies")
-    # Only show date inputs if downloading
-    download_start_date = st.sidebar.text_input(
-        "Download From (DD-MMM-YYYY)",
-        "06-Dec-2025"
-    )
-
-    download_end_date = st.sidebar.text_input(
-        "Download To (DD-MMM-YYYY)",
-        "19-Dec-2025"
-    )
-else:
-    st.sidebar.warning("Mode: Using Existing Master CSV (No Download)")
-    download_start_date = None
-    download_end_date = None
-
-st.sidebar.divider()
-
-# -------------------------------
-# 3. Strategy Settings
-# -------------------------------
-st.sidebar.subheader("⚙ Strategy Settings")
-
-decision_date_ui = st.sidebar.date_input(
-    "Decision Date (After Market Close)",
-    value=DECISION_DATE.date()
-)
-
-entry_date_ui = pd.to_datetime(decision_date_ui) + pd.tseries.offsets.BDay(1)
-
-st.sidebar.markdown(
-    f"""
-    **Entry Date (Auto):**  
-    `{entry_date_ui.date()}`
-    """
-)
-
-st.sidebar.divider()
-
-# -------------------------------
-# 4. Training Control
-# -------------------------------
-st.sidebar.subheader("🧠 Model Operations")
-
-training_mode = st.sidebar.radio(
-    "Select Model Strategy:",
-    ("Use Existing Pre-Trained Models", "Retrain & Save New Models"),
-    index=0
-)
-
-st.sidebar.divider()
-
-# -------------------------------
-# Action Buttons
-# -------------------------------
-run_pipeline = st.sidebar.button("▶ Run Quant Pipeline")
-run_performance = st.sidebar.button("📊 Run Weekly Performance")
-
-# ============================================================
-# RUN PIPELINE LOGIC
+# TABS ARCHITECTURE
 # ============================================================
 
-if run_pipeline:
-    st.subheader("🔄 Running Quant Pipeline")
-
-    # ----------------------------------------
-    # STEP 1: DOWNLOAD & UPDATE (OPTIONAL)
-    # ----------------------------------------
-    if update_data_mode:
-        with st.spinner(f"Fetching data from {download_start_date} to {download_end_date}..."):
-            try:
-                run_daily_data_pipeline(download_start_date, download_end_date)
-                st.success(f"✔ Data downloaded, merged, and appended to Master CSV")
-            except Exception as e:
-                st.error(f"✖ Data Pipeline Failed: {e}")
-                st.stop()
-    else:
-        st.info("ℹ Skipping download. Proceeding with existing Master CSV.")
-
-    # ----------------------------------------
-    # STEP 2: CLEANING & PRE-PROCESSING
-    # ----------------------------------------
-    # We must always load and clean the master file to generate the dataframe for features
-    with st.spinner("Processing Corporate Actions & Bad Ticks..."):
-        try:
-            df_clean = clean_corporate_events(MASTER_CSV)
-            st.success("✔ Corporate events cleaned")
-        except FileNotFoundError:
-            st.error("✖ Master CSV not found. Please enable 'Download' to create it.")
-            st.stop()
-
-    # ----------------------------------------
-    # STEP 3: REGIMES
-    # ----------------------------------------
-    with st.spinner("Integrating Market Regimes..."):
-        df_regime = integrate_regimes(
-            df_clean,
-            REGIME_TABLE,
-            MACRO_MAP
-        )
-        st.success("✔ Regimes integrated")
-
-    # ----------------------------------------
-    # STEP 4: FEATURE ENGINEERING
-    # ----------------------------------------
-    with st.spinner("Calculating Alpha Features..."):
-        df_feat = add_features(df_regime)
-        st.success("✔ Features built")
-
-    # ----------------------------------------
-    # STEP 5: MODEL TRAINING (CONDITIONAL)
-    # ----------------------------------------
-    if training_mode == "Retrain & Save New Models":
-        with st.spinner("Training new models on historical data..."):
-            # Filter data strictly before decision date for training
-            train_df = df_feat[df_feat["DATE"] <= DECISION_DATE]
-            train_and_save_models(train_df)
-            st.success("✔ Models retrained & saved to disk")
-    else:
-        st.info("ℹ Using existing models from disk")
-
-    # ----------------------------------------
-    # STEP 6: LIVE INFERENCE (TRADES)
-    # ----------------------------------------
-    with st.spinner("Running Inference (Champion/Challenger)..."):
-        try:
-            trade_sheet = live_trade_decision(df_feat)
-            st.success("🚀 LIVE trades generated")
-            
-            # Display Results
-            st.subheader("📌 LIVE TRADES")
-            st.dataframe(trade_sheet, use_container_width=True)
-
-            # Save Results
-            trade_path = f"{RESULTS_DIR}/LIVE_TRADES_{ENTRY_DATE.date()}.csv"
-            trade_sheet.to_csv(trade_path, index=False)
-            st.info(f"Saved → {trade_path}")
-            
-        except Exception as e:
-            st.error(f"✖ Trade Generation Failed: {e}")
+tab_strategy, tab_monitor = st.tabs([
+    "🚀 Strategy Pipeline", 
+    "⏱ Realtime Monitoring (4-Weeks)"
+])
 
 # ============================================================
-# RUN WEEKLY PERFORMANCE
+# TAB 1: STRATEGY PIPELINE
 # ============================================================
 
-if run_performance:
-    st.subheader("📊 Weekly Performance Check")
-
-    try:
-        summary, model_returns = run_weekly_performance_check(
-            exit_date=ENTRY_DATE + pd.Timedelta(days=4)
-        )
-
-        st.subheader("📈 Performance Summary")
-        st.dataframe(summary, use_container_width=True)
-
-        st.subheader("📉 Model Stock Returns")
-        st.dataframe(model_returns, use_container_width=True)
-
-        st.success("✔ Weekly evaluation completed")
-    except Exception as e:
-        st.error(f"Performance Check Failed: {e}")
-
-# ============================================================
-# STOCK PRICE VISUALIZER (Interactive Plot)
-# ============================================================
-
-st.divider()
-st.subheader("📈 Stock Price History Viewer")
-
-try:
-    # 1. Load Data
-    df_master = pd.read_csv(MASTER_CSV, low_memory=False)
-
-    # 2. Ensure Date Format
-    if "DATE1" in df_master.columns:
-        df_master["DATE_PLOT"] = pd.to_datetime(df_master["DATE1"])
-    elif "DATE" in df_master.columns:
-        df_master["DATE_PLOT"] = pd.to_datetime(df_master["DATE"])
-    else:
-        st.error("Date column not found in Master CSV")
-        st.stop()
-
-    # 3. Get Unique Symbols
-    all_symbols = sorted(df_master["SYMBOL"].unique().tolist())
-
-    # 4. Dropdown Selection
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        selected_symbol = st.selectbox("🔍 Select Stock Symbol", all_symbols)
+with tab_strategy:
     
-    if selected_symbol:
-        # 5. Filter & Sort Data
-        stock_data = df_master[
-            df_master["SYMBOL"] == selected_symbol
-        ].sort_values("DATE_PLOT")
+    # --- SIDEBAR FOR TAB 1 ---
+    st.sidebar.header("📅 Strategy Controls")
+    
+    # 1. Master Data Info
+    current_start, current_end = get_master_date_range()
+    st.sidebar.markdown(f"**Master Range:** `{current_start}` to `{current_end}`")
+    st.sidebar.divider()
 
-        # 6. Plotting
-        # We set DATE as index for Streamlit to recognize it as the X-axis
-        chart_data = stock_data.set_index("DATE_PLOT")["CLOSE_PRICE"]
+    # 2. Update Toggle
+    update_data_mode = st.sidebar.checkbox("Download & Append New Data?", value=True, key="chk_update")
+    
+    if update_data_mode:
+        # Default dates for download convenience
+        def_start = (datetime.now() - timedelta(days=14)).strftime("%d-%b-%Y")
+        def_end = datetime.now().strftime("%d-%b-%Y")
 
-        st.markdown(f"#### Closing Price History: **{selected_symbol}**")
-        st.line_chart(chart_data)
+        download_start_date = st.sidebar.text_input("Download From", def_start, key="dl_start")
+        download_end_date = st.sidebar.text_input("Download To", def_end, key="dl_end")
+    else:
+        download_start_date = None
+        download_end_date = None
 
-        # 7. Optional: Show raw data in expander
-        with st.expander(f"View Raw Data for {selected_symbol}"):
-            st.dataframe(stock_data[["DATE_PLOT", "CLOSE_PRICE", "TTL_TRD_QNTY", "DELIV_PER"]].tail(50), use_container_width=True)
+    st.sidebar.divider()
 
-except FileNotFoundError:
-    st.warning("⚠ Master CSV not found yet. Please run the pipeline to generate data.")
-except Exception as e:
-    st.error(f"Error loading visualization: {e}")
+    # 3. Decision Date (CRITICAL: TAKEN FROM UI)
+    st.sidebar.subheader("⚙ Strategy Settings")
+    
+    ui_decision_date = st.sidebar.date_input(
+        "Decision Date (After Market Close)", 
+        value=DEFAULT_DECISION_DATE.date(), 
+        key="ui_dec_date"
+    )
+    
+    # Convert UI date to Timestamp for backend
+    ts_decision_date = pd.Timestamp(ui_decision_date)
+    
+    # Calculate Entry Date (Next BDay)
+    ts_entry_date = ts_decision_date + pd.tseries.offsets.BDay(1)
+    
+    st.sidebar.info(f"Auto Entry Date: {ts_entry_date.date()}")
+    st.sidebar.divider()
+
+    # 4. Training Mode
+    training_mode = st.sidebar.radio(
+        "Model Strategy:",
+        ("Use Existing Pre-Trained Models", "Retrain & Save New Models"),
+        index=0,
+        key="rad_train"
+    )
+
+    st.sidebar.divider()
+    
+    # 5. Action Buttons
+    btn_run_pipeline = st.sidebar.button("▶ Run Strategy Pipeline")
+    btn_perf_check = st.sidebar.button("📊 Run Performance Check")
+
+    # --- MAIN CONTENT FOR TAB 1 ---
+
+    if btn_run_pipeline:
+        st.subheader(f"🔄 Running Pipeline for Decision Date: {ui_decision_date}")
+
+        # 1. Download
+        if update_data_mode:
+            with st.spinner(f"Fetching {download_start_date} to {download_end_date}..."):
+                try:
+                    run_daily_data_pipeline(download_start_date, download_end_date)
+                    st.success("✔ Data downloaded & appended")
+                except Exception as e:
+                    st.error(f"Pipeline Error: {e}")
+                    st.stop()
+        
+        # 2. Clean
+        with st.spinner("Cleaning Data..."):
+            try:
+                df_clean = clean_corporate_events(MASTER_CSV)
+                st.success("✔ Cleaned")
+            except:
+                st.error("Master CSV missing."); st.stop()
+
+        # 3. Regime (Pass UI Date)
+        with st.spinner("Integrating Regimes..."):
+            df_regime = integrate_regimes(
+                df_clean, 
+                REGIME_TABLE, 
+                MACRO_MAP, 
+                cutoff_date=ts_decision_date # <--- UI Date Used
+            )
+            st.success("✔ Regimes Done")
+
+        # 4. Features
+        with st.spinner("Building Features..."):
+            df_feat = add_features(df_regime)
+            st.success("✔ Features Done")
+
+        # 5. Train (Pass UI Date)
+        if training_mode == "Retrain & Save New Models":
+            with st.spinner("Retraining..."):
+                train_df = df_feat[df_feat["DATE"] <= ts_decision_date] # <--- UI Date Used
+                train_and_save_models(train_df)
+                st.success("✔ Retrained")
+        
+        # 6. Trade (Pass UI Date)
+        with st.spinner("Generating Trades..."):
+            try:
+                trade_sheet = live_trade_decision(
+                    df_feat, 
+                    decision_date=ts_decision_date, # <--- UI Date Used
+                    entry_date=ts_entry_date        # <--- UI Date Used
+                )
+                st.success("🚀 Trades Generated")
+                st.dataframe(trade_sheet, use_container_width=True)
+                
+                out_file = f"{RESULTS_DIR}/LIVE_TRADES_{ts_entry_date.date()}.csv"
+                trade_sheet.to_csv(out_file, index=False)
+                st.info(f"Saved: {out_file}")
+            except Exception as e:
+                st.error(f"Trade Error: {e}")
+
+    if btn_perf_check:
+        st.subheader("📊 Performance Check")
+        try:
+            # Pass UI Date to performance engine
+            summary, model_returns = run_weekly_performance_check(ts_decision_date)
+            st.dataframe(summary, use_container_width=True)
+            st.dataframe(model_returns, use_container_width=True)
+        except Exception as e:
+            st.error(f"Performance Error: {e}")
+
+    # --- STOCK VISUALIZER (MASTER DATA) ---
+    st.divider()
+    st.markdown("#### 📂 Master Data Visualizer")
+    try:
+        df_m = pd.read_csv(MASTER_CSV, low_memory=False)
+        if "DATE1" in df_m.columns: df_m["D"] = pd.to_datetime(df_m["DATE1"])
+        else: df_m["D"] = pd.to_datetime(df_m["DATE"])
+        
+        syms = sorted(df_m["SYMBOL"].unique())
+        col1, col2 = st.columns([1,3])
+        with col1:
+            sel = st.selectbox("Select Symbol (Master Data)", syms, key="sel_master")
+        
+        if sel:
+            d_sub = df_m[df_m["SYMBOL"]==sel].sort_values("D").set_index("D")["CLOSE_PRICE"]
+            st.line_chart(d_sub)
+    except:
+        st.warning("Master CSV not available.")
+
+# ============================================================
+# TAB 2: REALTIME MONITORING (4-WEEKS)
+# ============================================================
+
+with tab_monitor:
+    st.header("⏱ Realtime 4-Week Monitor")
+    st.markdown("Fetch the last 4 weeks of data on-demand (independent of Master CSV) and visualize.")
+
+    col_date, col_btn = st.columns([1, 2])
+    
+    with col_date:
+        # User selects "Today" or any reference date
+        monitor_date = st.date_input("Select Reference Date (End Date)", datetime.now(), key="mon_date")
+    
+    with col_btn:
+        st.write("") # Spacer
+        st.write("")
+        fetch_btn = st.button("📥 Fetch Last 4 Weeks & Load", key="btn_fetch_mon")
+
+    # Initialize Session State for Data persistence
+    if "monitor_df" not in st.session_state:
+        st.session_state.monitor_df = None
+
+    if fetch_btn:
+        ts_monitor = pd.Timestamp(monitor_date)
+        with st.spinner(f"Downloading data for 4 weeks ending {monitor_date}..."):
+            try:
+                # Calls data_pipeline logic to fetch 28 days back from selected date
+                df_mon = fetch_monitoring_data(ts_monitor)
+                
+                if not df_mon.empty:
+                    st.session_state.monitor_df = df_mon
+                    st.success(f"✔ Loaded {len(df_mon)} rows from {df_mon['DATE'].min().date()} to {df_mon['DATE'].max().date()}")
+                else:
+                    st.warning("No data found for this range.")
+            except Exception as e:
+                st.error(f"Fetch failed: {e}")
+
+    st.divider()
+
+    # Visualizer for Monitor Data
+    if st.session_state.monitor_df is not None:
+        df_real = st.session_state.monitor_df
+        
+        all_syms_real = sorted(df_real["SYMBOL"].unique().tolist())
+        
+        col_m1, col_m2 = st.columns([1,3])
+        with col_m1:
+            sel_sym_real = st.selectbox(
+                "🔍 Select Stock Symbol (Realtime Data)", 
+                all_syms_real, 
+                key="sel_sym_real"
+            )
+        
+        if sel_sym_real:
+            # Filter
+            subset = df_real[df_real["SYMBOL"] == sel_sym_real].sort_values("DATE")
+            
+            # Plot
+            st.subheader(f"Price Trend: {sel_sym_real}")
+            
+            chart_data = subset.set_index("DATE")["CLOSE_PRICE"]
+            st.line_chart(chart_data)
+            
+            with st.expander("View Raw Data"):
+                st.dataframe(subset, use_container_width=True)
+    else:
+        st.info("👈 Select a date and click Fetch to start monitoring.")
